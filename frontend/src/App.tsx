@@ -36,9 +36,7 @@ type Persona = {
 };
 
 type Message = { sender: 'user' | 'ai'; text: string; timestamp: string; };
-type GuidedClosureAnswers = { gratitude: string; regret: string; memory: string; future: string; };
 type ChatApiMessage = { id: string; sender: 'user' | 'ai' | 'system'; text: string; timestamp: string; };
-type ChatApiResponse = { personaStatus: 'active' | 'expired'; remainingMs?: number; messages?: ChatApiMessage[]; };
 type PersonaApiResponse = { id: string; name: string; relationship: string; userNickname?: string; biography?: string; speakingStyle?: string; status: 'active' | 'expired' | 'deleted'; expiresAt: string | null; remainingMs?: number | null; traits?: string[]; keyMemories?: string[]; commonPhrases?: string[]; voiceSampleUrl?: string | null; };
 type PersonaFormInput = { name: string; relationship: string; userNickname: string; biography: string; speakingStyle: string; voiceUrl?: string; traits: string[]; keyMemories: string[]; commonPhrases: string[]; };
 
@@ -65,19 +63,6 @@ const Input = ({ style, className, ...props }: InputHTMLAttributes<HTMLInputElem
 const TextArea = ({ style, ...props }: TextareaHTMLAttributes<HTMLTextAreaElement>) => (
   <textarea className="textarea" style={{ width: '100%', resize: 'vertical', ...style }} {...props} />
 );
-
-/* --- SMART GREETING GENERATOR --- */
-const getDynamicGreeting = (p: Persona) => {
-  const style = p.speakingStyle.toLowerCase();
-  const nick = p.userNickname || 'my dear';
-  
-  if (style.includes('manglish') || style.includes('singlish')) return `Eh ${nick}, you eat full already?`;
-  if (style.includes('formal') || style.includes('poetic')) return `My dearest ${nick}, I am listening.`;
-  if (style.includes('grumpy') || style.includes('stern')) return `Hmph. What do you want, ${nick}?`;
-  if (style.includes('cheerful') || style.includes('happy')) return `Hello ${nick}! So good to see you!`;
-  
-  return `Hello ${nick}, how are you doing today?`;
-};
 
 /* --- SUB COMPONENTS --- */
 const PersonaForm = ({ initialData, onSubmit, isEditing, onCancel }: { initialData?: Partial<Persona>, onSubmit: (data: PersonaFormInput) => void, isEditing?: boolean, onCancel?: () => void }) => {
@@ -114,9 +99,16 @@ const PersonaForm = ({ initialData, onSubmit, isEditing, onCancel }: { initialDa
           <div className="form-section-title">Voice</div>
           <div className="grid-2">
             <label>Nickname for You <Input value={formData.userNickname} onChange={e=>setFormData({...formData, userNickname:e.target.value})} required placeholder="e.g. Ah Boy" /></label>
-            <label>Speaking Style <Input value={formData.speakingStyle} onChange={e=>setFormData({...formData, speakingStyle:e.target.value})} required placeholder="e.g. Manglish, Formal" /></label>
+            <label>Speaking Style <Input value={formData.speakingStyle} onChange={e=>setFormData({...formData, speakingStyle:e.target.value})} required placeholder="e.g. Manglish, Rude, uses 'sohai'" /></label>
           </div>
           <label style={{marginTop:12}}>Life Context <TextArea rows={2} value={formData.biography} onChange={e=>setFormData({...formData, biography:e.target.value})} placeholder="e.g. Lived in Ipoh, loved cooking..." /></label>
+          
+          <div className="form-section-title" style={{marginTop:20}}>Personality</div>
+           <div className="grid-2">
+             <label>Key Memories <TextArea rows={3} value={formData.keyMemories} onChange={e=>setFormData({...formData, keyMemories:e.target.value})} placeholder="Comma separated..." /></label>
+             <label>Common Phrases <TextArea rows={3} value={formData.commonPhrases} onChange={e=>setFormData({...formData, commonPhrases:e.target.value})} placeholder="Phrases they use often..." /></label>
+          </div>
+          <label style={{marginTop:12}}>Traits <Input value={formData.traits} onChange={e=>setFormData({...formData, traits:e.target.value})} placeholder="Rude, Funny, Loving..." /></label>
         </div>
         <div style={{display:'flex', gap:12, justifyContent:'flex-end', marginTop:20}}>
           {isEditing && <Button type="button" variant="ghost" onClick={onCancel}>Cancel</Button>}
@@ -158,11 +150,17 @@ const App = () => {
       setPersonas([p]);
       setSelectedPersonaId(p.id);
       
-      // INJECT SMART GREETING LOCALLY
-      setChatMessages(prev => {
-        if (prev[p.id]) return prev;
-        return { [p.id]: [{ sender: 'ai', text: getDynamicGreeting(p), timestamp: new Date().toISOString() }] };
-      });
+      // FETCH MESSAGES from Server (Truth)
+      if (p.id) {
+         const msgRes = await fetch(`${API_BASE_URL}/${p.id}/chat`, { headers: buildAuthHeaders() });
+         const msgData = await msgRes.json();
+         // Normalize and sort
+         const history = (msgData.messages || []).map((m: any) => ({
+           sender: m.sender, text: m.text, timestamp: m.timestamp
+         })).filter((m: any) => !m.text.startsWith('[HIDDEN_INSTRUCTION]')); // Filter out our hidden triggers
+         
+         setChatMessages(prev => ({ ...prev, [p.id]: history }));
+      }
       return p;
     } catch (e) { return null; }
   }, [normalizePersona]);
@@ -178,18 +176,35 @@ const App = () => {
     await loadPersona(); setIsEditing(false);
   };
 
-  const handleSend = async (text: string) => {
+  const sendMessage = async (text: string, isHiddenInstruction = false) => {
     if (!selectedPersona) return;
     const pid = selectedPersona.id;
-    setChatMessages(prev => ({ ...prev, [pid]: [...(prev[pid]||[]), { sender: 'user', text, timestamp: new Date().toISOString() }] }));
+    
+    // Only show in UI if it's NOT a hidden instruction
+    if (!isHiddenInstruction) {
+        setChatMessages(prev => ({ ...prev, [pid]: [...(prev[pid]||[]), { sender: 'user', text, timestamp: new Date().toISOString() }] }));
+    }
+    
     setIsSending(true);
     try {
-      const res = await fetch(`${API_BASE_URL}/persona/${pid}/chat`, { method: 'POST', headers: {'Content-Type':'application/json', ...buildAuthHeaders()}, body: JSON.stringify({ text, clientMessageId: createRandomId() }) });
+      const res = await fetch(`${API_BASE_URL}/${pid}/chat`, { method: 'POST', headers: {'Content-Type':'application/json', ...buildAuthHeaders()}, body: JSON.stringify({ text, clientMessageId: createRandomId() }) });
       const data = await res.json();
       const aiText = data.aiMessage || "...";
       setChatMessages(prev => ({ ...prev, [pid]: [...(prev[pid]||[]), { sender: 'ai', text: aiText, timestamp: new Date().toISOString() }] }));
     } catch (e) { /* handle error */ } finally { setIsSending(false); }
   };
+
+  // AUTO-GREETING: If chat is empty when opened, trigger the AI
+  useEffect(() => {
+    if (view === 'chat' && selectedPersona) {
+        const msgs = chatMessages[selectedPersona.id] || [];
+        if (msgs.length === 0 && !isSending) {
+            // TRIGGER THE AI TO SPEAK FIRST
+            // The text "[HIDDEN_INSTRUCTION]..." tells the AI this is a system prompt, not user text
+            sendMessage("[HIDDEN_INSTRUCTION] The user has entered the room. Start the conversation now. Greet them authentically based on your persona profile and style.", true);
+        }
+    }
+  }, [view, selectedPersona, chatMessages]);
 
   return (
     <div className="app">
@@ -257,7 +272,7 @@ const App = () => {
               {isSending && <div style={{paddingLeft:32, color:'#aaa', fontStyle:'italic'}}>{selectedPersona.name} is typing...</div>}
               <div ref={chatBottomRef} />
             </div>
-            <form onSubmit={e => { e.preventDefault(); const el = (e.target as any).elements.text; if(el.value.trim()) { handleSend(el.value); el.value=''; } }} className="chat-bottom">
+            <form onSubmit={e => { e.preventDefault(); const el = (e.target as any).elements.text; if(el.value.trim()) { sendMessage(el.value); el.value=''; } }} className="chat-bottom">
               <input name="text" className="chat-input" placeholder="Type a message..." disabled={isSending} autoFocus />
               <button type="submit" className="send-circle" disabled={isSending}>↑</button>
             </form>

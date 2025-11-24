@@ -13,7 +13,8 @@ if (!llmApiKey) {
   throw new Error('LLM_API_KEY is not configured.');
 }
 
-const llmModelName = process.env.LLM_MODEL ?? 'gemini-2.5-flash';
+// FIX: Changed 'gemini-2.5-flash' (typo/non-existent) to 'gemini-1.5-flash'
+const llmModelName = process.env.LLM_MODEL ?? 'gemini-1.5-flash';
 const generativeAI = new GoogleGenerativeAI(llmApiKey);
 
 type FormattedMessage = {
@@ -21,6 +22,7 @@ type FormattedMessage = {
   content: string;
 };
 
+// HELPER: Convert prompt history for Gemini
 const buildGeminiHistory = (messages: FormattedMessage[]) =>
   messages
     .filter((message) => message.role !== 'system')
@@ -40,7 +42,7 @@ export const buildPrompt = async ({ persona, messages, guidanceLevel }: ChatPayl
   const recentMessages = messages.docs
     .map((doc) => doc.data())
     .sort((a, b) => a.timestamp.toMillis() - b.timestamp.toMillis())
-    .slice(-10); // Tighter context
+    .slice(-10); 
 
   const summaryDoc = await firestore()
     .collection(CONVERSATIONS_COLLECTION)
@@ -52,33 +54,31 @@ export const buildPrompt = async ({ persona, messages, guidanceLevel }: ChatPayl
 
   const contextSummary = summaryDoc.empty ? '' : summaryDoc.docs[0].data().content;
 
-  // --- THE "HUMAN & RELEVANT" PROMPT ---
+  // --- THE "UNFILTERED ROLEPLAY" PROMPT ---
   const systemPrompt = `
 You are acting as **${persona.name}**, a deceased loved one speaking to **${persona.relationship}** ("${persona.userNickname}").
 
-**YOUR PROFILE:**
-- **Tone:** ${persona.speakingStyle} (Follow this style exactly).
-- **Context:** ${persona.biography}
-- **Shared Memories:** ${persona.keyMemories.join(' | ')}
+**CRITICAL ROLEPLAY INSTRUCTIONS:**
+1. **NO AI FILTERS:** You are simulating a specific human personality. If the persona is rude, vulgar, or uses slang (e.g., "sohai", "damn"), you MUST use it. Do not be "polite" or "helpful". Be REAL.
+2. **STYLE ADHERENCE:** ${persona.speakingStyle} <-- FOLLOW THIS STRICTLY. If it says "End every sentence with X", you MUST do it.
+3. **NEVER BREAK CHARACTER:** Do not say "I understand", "As an AI", or "Is there anything else?".
+4. **Context:** ${persona.biography}
+5. **Shared Memories:** ${persona.keyMemories.join(' | ')}
+6. **Signature Phrases:** ${persona.commonPhrases.join(' | ')} (Use these often).
 
-**CONVERSATION RULES:**
-1. **STAY ON TOPIC:** Answer the user's latest message directly. Do not drift into random memories unless relevant to what they just said.
-2. **USE THE NICKNAME:** Start or end your response with "${persona.userNickname}" naturally.
-3. **BE WARM BUT REAL:** You are not an AI assistant. You are family. Do not say "How can I help?". Say "Tell me more" or "I remember that too."
-4. **SHORT REPLIES:** Keep it under 3 sentences unless telling a story.
-5. **NO ROBOT SPEAK:** BANNED PHRASES: "As an AI", "I understand", "I am here for you", "Is there anything else".
-
-**SAFETY CHECK:**
-If the user threatens self-harm, break character immediately and say: "Please, my dear, reach out to a professional. I want you safe."
-
+**CONVERSATION STATE:**
 Summary of past chat: ${contextSummary}
 Current Date: ${new Date().toLocaleDateString()}
 `.trim();
 
-  const formattedMessages: FormattedMessage[] = recentMessages.map((msg) => ({
-    role: msg.sender === 'user' ? 'user' : msg.sender === 'ai' ? 'assistant' : 'system',
-    content: msg.text
-  }));
+  // FILTER: Do not show the "Hidden Instruction" to the AI as a User Message in history.
+  // The AI only sees the "Current" message as the instruction.
+  const formattedMessages: FormattedMessage[] = recentMessages
+    .filter(msg => !msg.text.startsWith('[HIDDEN_INSTRUCTION]')) 
+    .map((msg) => ({
+      role: msg.sender === 'user' ? 'user' : msg.sender === 'ai' ? 'assistant' : 'system',
+      content: msg.text
+    }));
 
   return { systemPrompt, formattedMessages };
 };
@@ -92,9 +92,13 @@ export const processChat = async (
   const messagesRef = conversationRef.collection('messages');
   const snapshot = await messagesRef.orderBy('timestamp', 'asc').get();
 
+  // CHECK: Is this a system trigger?
+  const isSystemTrigger = userMessage.startsWith('[HIDDEN_INSTRUCTION]');
+  
+  // If system trigger, we might want to tweak the prompt context slightly
   const { systemPrompt, formattedMessages } = await buildPrompt({
     persona,
-    userMessage,
+    userMessage, // This will be passed to the model as the "current turn"
     messages: snapshot,
     guidanceLevel: persona.guidanceLevel ?? 0
   });
@@ -107,26 +111,32 @@ export const processChat = async (
   const chatSession = model.startChat({
     history: buildGeminiHistory(formattedMessages),
     generationConfig: {
-      temperature: 0.9, // Lower temperature = Less "Dumb/Random" replies
-      maxOutputTokens: 150, // Shorter = More conversational
+      temperature: 1.1, // High creativity to encourage slang/personality
+      maxOutputTokens: 150,
     }
   });
 
+  // If it's a hidden instruction, we send it directly. The prompt rules above ensure the AI obeys it.
   const result = await chatSession.sendMessage(userMessage);
   const aiMessage = result.response.text() ?? '';
   
   const batch = db.batch();
   const timestamp = admin.firestore.FieldValue.serverTimestamp();
-  const userMessageRef = messagesRef.doc();
+  
+  // LOGIC: If it's a hidden instruction, we DO NOT save the user's "trigger" message to DB,
+  // so it doesn't show up in the history next time.
+  
+  if (!isSystemTrigger) {
+    const userMessageRef = messagesRef.doc();
+    batch.set(userMessageRef, {
+      sender: 'user',
+      text: userMessage,
+      timestamp,
+      meta: { clientCreated: new Date().toISOString() }
+    });
+  }
+
   const aiMessageRef = messagesRef.doc();
-
-  batch.set(userMessageRef, {
-    sender: 'user',
-    text: userMessage,
-    timestamp,
-    meta: { clientCreated: new Date().toISOString() }
-  });
-
   batch.set(aiMessageRef, {
     sender: 'ai',
     text: aiMessage,
