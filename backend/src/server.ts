@@ -19,25 +19,29 @@ const {
   FIREBASE_CLIENT_EMAIL,
   FIREBASE_PRIVATE_KEY,
   FIREBASE_DATABASE_URL,
+  GOOGLE_APPLICATION_CREDENTIALS,
   PORT = "5000",
 } = process.env;
 
-// Validate env
-if (!FIREBASE_PROJECT_ID || !FIREBASE_CLIENT_EMAIL || !FIREBASE_PRIVATE_KEY) {
-  console.error("Missing Firebase environment variables.");
+if (FIREBASE_PROJECT_ID && FIREBASE_CLIENT_EMAIL && FIREBASE_PRIVATE_KEY) {
+  const firebasePrivateKey = FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n");
+  admin.initializeApp({
+    credential: admin.credential.cert({
+      projectId: FIREBASE_PROJECT_ID,
+      clientEmail: FIREBASE_CLIENT_EMAIL,
+      privateKey: firebasePrivateKey,
+    }),
+    databaseURL: FIREBASE_DATABASE_URL || `https://${FIREBASE_PROJECT_ID}.firebaseio.com`
+  });
+} else if (GOOGLE_APPLICATION_CREDENTIALS) {
+  admin.initializeApp({
+    credential: admin.credential.applicationDefault(),
+    databaseURL: FIREBASE_DATABASE_URL || (FIREBASE_PROJECT_ID ? `https://${FIREBASE_PROJECT_ID}.firebaseio.com` : undefined)
+  });
+} else {
+  console.error("Missing Firebase environment variables (provide FIREBASE_* or GOOGLE_APPLICATION_CREDENTIALS).");
   process.exit(1);
 }
-
-const firebasePrivateKey = FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n");
-
-admin.initializeApp({
-  credential: admin.credential.cert({
-    projectId: FIREBASE_PROJECT_ID,
-    clientEmail: FIREBASE_CLIENT_EMAIL,
-    privateKey: firebasePrivateKey,
-  }),
-  databaseURL: FIREBASE_DATABASE_URL || `https://${FIREBASE_PROJECT_ID}.firebaseio.com`
-});
 
 const PERSONAS_COLLECTION = 'personas';
 const DEFAULT_GUIDANCE_MESSAGE = 'This persona has reached closure. Take a moment to reflect.';

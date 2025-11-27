@@ -10,14 +10,37 @@ import { firestore } from '../lib/firebaseAdmin.js';
 
 const router = Router();
 
-const personaSchema = Joi.object({
-  name: Joi.string().max(120).required(),
-  relationship: Joi.string().max(120).required(),
+const editableFieldsCreate = {
+  userNickname: Joi.string().max(120).allow('').required(),
+  biography: Joi.string().max(4000).allow('').required(),
+  speakingStyle: Joi.string().max(4000).allow('').required(),
   traits: Joi.array().items(Joi.string()).max(8).required(),
   keyMemories: Joi.array().items(Joi.string()).max(10).required(),
   commonPhrases: Joi.array().items(Joi.string()).max(10).required(),
-  voiceSampleUrl: Joi.string().uri().optional()
+  voiceSampleUrl: Joi.string().uri().allow('', null).optional()
+};
+
+const editableFieldsUpdate = {
+  userNickname: Joi.string().max(120).allow(''),
+  biography: Joi.string().max(4000).allow(''),
+  speakingStyle: Joi.string().max(4000).allow(''),
+  traits: Joi.array().items(Joi.string()).max(8),
+  keyMemories: Joi.array().items(Joi.string()).max(10),
+  commonPhrases: Joi.array().items(Joi.string()).max(10),
+  voiceSampleUrl: Joi.string().uri().allow('', null)
+};
+
+const createPersonaSchema = Joi.object({
+  name: Joi.string().max(120).required(),
+  relationship: Joi.string().max(120).required(),
+  ...editableFieldsCreate
 });
+
+const updatePersonaSchema = Joi.object({
+  name: Joi.forbidden(),
+  relationship: Joi.forbidden(),
+  ...editableFieldsUpdate
+}).min(1);
 
 router.get('/', async (req: AuthenticatedRequest, res, next) => {
   try {
@@ -30,6 +53,9 @@ router.get('/', async (req: AuthenticatedRequest, res, next) => {
       id: persona.id,
       name: persona.name,
       relationship: persona.relationship,
+      userNickname: persona.userNickname ?? '',
+      biography: persona.biography ?? '',
+      speakingStyle: persona.speakingStyle ?? '',
       status: persona.status,
       expiresAt: persona.expiresAt?.toDate().toISOString() ?? null,
       remainingMs,
@@ -46,7 +72,7 @@ router.get('/', async (req: AuthenticatedRequest, res, next) => {
 
 router.post('/', async (req: AuthenticatedRequest, res, next) => {
   try {
-    const payload = await personaSchema.validateAsync(req.body, { abortEarly: false });
+    const payload = await createPersonaSchema.validateAsync(req.body, { abortEarly: false });
     const personaId = await createPersona(req.user!.uid, payload);
     return res.status(201).json({ id: personaId });
   } catch (error) {
@@ -56,7 +82,7 @@ router.post('/', async (req: AuthenticatedRequest, res, next) => {
 
 router.put('/:personaId', async (req: AuthenticatedRequest, res, next) => {
   try {
-    const payload = await personaSchema.validateAsync(req.body, { abortEarly: false });
+    const payload = await updatePersonaSchema.validateAsync(req.body, { abortEarly: false });
     await updatePersona(req.params.personaId, req.user!.uid, payload);
     return res.status(204).send();
   } catch (error) {
