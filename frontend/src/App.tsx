@@ -88,6 +88,21 @@ const PersonaForm = ({ initialData, onSubmit, onDelete, isEditing, onCancel }: {
     commonPhrases: initialData?.commonPhrases?.join('\n') || '', voiceUrl: initialData?.voiceUrl || ''
   });
 
+  // keep form in sync when opening edit modal
+  useEffect(() => {
+    setFormData({
+      name: initialData?.name || '',
+      relationship: initialData?.relationship || '',
+      userNickname: initialData?.userNickname || '',
+      biography: initialData?.biography || '',
+      speakingStyle: initialData?.speakingStyle || '',
+      traits: initialData?.traits?.join('\n') || '',
+      keyMemories: initialData?.keyMemories?.join('\n') || '',
+      commonPhrases: initialData?.commonPhrases?.join('\n') || '',
+      voiceUrl: initialData?.voiceUrl || ''
+    });
+  }, [initialData]);
+
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
     onSubmit({
@@ -295,9 +310,15 @@ const App = () => {
 
   const handleUpdate = async (input: PersonaFormInput) => {
     if (!selectedPersona || !user) return;
-    const { name, relationship, ...allowedUpdates } = input;
-    const payload = { ...allowedUpdates, voiceSampleUrl: allowedUpdates.voiceUrl || undefined };
-    delete (payload as any).voiceUrl;
+    const payload = {
+      userNickname: input.userNickname || '',
+      biography: input.biography || '',
+      speakingStyle: input.speakingStyle || '',
+      traits: input.traits,
+      keyMemories: input.keyMemories,
+      commonPhrases: input.commonPhrases,
+      voiceSampleUrl: input.voiceUrl || undefined
+    };
     const res = await fetch(`${API_BASE_URL}/persona/${selectedPersona.id}`, { 
         method: 'PUT',
         headers: {'Content-Type':'application/json', ...buildAuthHeaders()}, 

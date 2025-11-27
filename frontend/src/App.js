@@ -166,7 +166,17 @@ const App = () => {
     const handleCreate = async (input) => {
         if (!user)
             return;
-        const payload = { ...input, voiceSampleUrl: input.voiceUrl || undefined };
+        const payload = {
+            ...input,
+            voiceSampleUrl: input.voiceUrl || undefined,
+            // ensure fields exist even if empty to help backend prompt fidelity
+            userNickname: input.userNickname || '',
+            biography: input.biography || '',
+            speakingStyle: input.speakingStyle || '',
+            traits: input.traits,
+            keyMemories: input.keyMemories,
+            commonPhrases: input.commonPhrases
+        };
         const res = await fetch(`${API_BASE_URL}/persona`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', ...buildAuthHeaders() },
@@ -242,11 +252,21 @@ const App = () => {
                 headers: { 'Content-Type': 'application/json', ...buildAuthHeaders() },
                 body: JSON.stringify({ text, clientMessageId: createClientMessageId() })
             });
+            if (!res.ok) {
+                const body = await res.text();
+                throw new Error(`Chat failed (${res.status}): ${body || res.statusText}`);
+            }
             const data = await res.json();
             const aiText = data.messages.find((m) => m.sender === 'ai')?.text || "...";
             setChatMessages(prev => ({ ...prev, [pid]: [...(prev[pid] || []).filter(m => m.timestamp !== 'pending'), { sender: 'ai', text: aiText, timestamp: new Date().toISOString() }] }));
         }
-        catch (e) { /* handle error */ }
+        catch (e) {
+            console.error(e);
+            if (!isHiddenInstruction) {
+                setChatMessages(prev => ({ ...prev, [pid]: [...(prev[pid] || []), { sender: 'ai', text: 'Unable to send message. Please try again.', timestamp: new Date().toISOString() }] }));
+            }
+            alert(`Chat request failed. ${e instanceof Error ? e.message : ''}`);
+        }
         finally {
             setIsSending(false);
         }
@@ -255,7 +275,8 @@ const App = () => {
         if (view === 'chat' && selectedPersona) {
             const msgs = chatMessages[selectedPersona.id] || [];
             if (msgs.length === 0 && !isSending) {
-                sendMessage("[HIDDEN_INSTRUCTION] The user has entered the room. Start the conversation now. Greet them authentically based on your persona profile and style.", true);
+                const nick = selectedPersona.userNickname || 'friend';
+                sendMessage(`[HIDDEN_INSTRUCTION] The user has entered the room. Start the conversation now. Greet them by their nickname "${nick}" in a short, human, casual way. Do not add scenery or poetic language. Do not bring up any location (including China) unless they ask. Keep it 1-2 sentences.`, true);
             }
         }
     }, [view, selectedPersonaId]);
