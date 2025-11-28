@@ -5,6 +5,8 @@ import { AppRoute } from '../types';
 export const Landing = () => {
   const { navigate, state, login } = useApp();
   const [showLogin, setShowLogin] = useState(false);
+  const [isSignup, setIsSignup] = useState(false);
+  const [name, setName] = useState('');
   const [email, setEmail] = useState(state.userEmail || '');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -19,8 +21,8 @@ export const Landing = () => {
 
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email.trim() || !password.trim()) {
-      setError('Email and password are required.');
+    if (!email.trim() || !password.trim() || (isSignup && !name.trim())) {
+      setError('All fields are required.');
       return;
     }
     setError('');
@@ -66,9 +68,6 @@ export const Landing = () => {
               className="bg-stone-900 text-white px-8 py-4 rounded-full font-medium text-lg shadow-[0_10px_30px_-10px_rgba(28,25,23,0.3)] hover:bg-stone-800 hover:scale-[1.02] transition-all"
             >
               Start Your Journey
-            </button>
-            <button className="px-8 py-4 rounded-full font-medium text-stone-600 hover:bg-white/50 transition-all border border-transparent hover:border-stone-200">
-              Learn about the methodology
             </button>
           </div>
         </div>
@@ -129,8 +128,14 @@ export const Landing = () => {
           >
             X
           </button>
-          <h3 className="font-serif text-2xl text-stone-800 mb-2">Log in to begin</h3>
-          <p className="text-stone-500 text-sm mb-6">Use a simple login to start your session and create a persona.</p>
+          <h3 className="font-serif text-2xl text-stone-800 mb-2">
+            {isSignup ? 'Create an account' : 'Log in to begin'}
+          </h3>
+          <p className="text-stone-500 text-sm mb-6">
+            {isSignup 
+              ? 'Start your journey by creating a personal space.' 
+              : 'Use a simple login to start your session and create a persona.'}
+          </p>
           <form
             onSubmit={(e) => {
               handleLogin(e);
@@ -138,6 +143,18 @@ export const Landing = () => {
             }}
             className="space-y-4"
           >
+            {isSignup && (
+              <div>
+                <label className="block text-xs font-bold text-stone-400 uppercase tracking-widest mb-2">Name</label>
+                <input
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  className="w-full px-4 py-3 rounded-xl border border-stone-200 focus:border-indigo-300 focus:ring-2 focus:ring-indigo-50 outline-none"
+                  required
+                />
+              </div>
+            )}
             <div>
               <label className="block text-xs font-bold text-stone-400 uppercase tracking-widest mb-2">Email</label>
               <input
@@ -163,9 +180,18 @@ export const Landing = () => {
               type="submit"
               className="w-full bg-stone-900 text-white py-3 rounded-xl font-medium hover:bg-stone-800 transition-all"
             >
-              {state.isAuthenticated ? 'Logged in' : 'Login & Continue'}
+              {state.isAuthenticated ? 'Logged in' : (isSignup ? 'Sign Up' : 'Login & Continue')}
             </button>
           </form>
+          
+          <div className="mt-6 text-center">
+            <button 
+              onClick={() => setIsSignup(!isSignup)}
+              className="text-sm text-stone-500 hover:text-stone-800 underline"
+            >
+              {isSignup ? 'Already have an account? Log in' : "Don't have an account? Sign up"}
+            </button>
+          </div>
         </div>
       </div>
       )}
