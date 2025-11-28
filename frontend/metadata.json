@@ -1,0 +1,7 @@
+{
+  "name": "Rememory",
+  "description": "A compassionate, time-limited grief support application enabling structured closure through AI persona interaction.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}

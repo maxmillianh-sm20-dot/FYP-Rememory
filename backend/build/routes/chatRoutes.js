@@ -78,9 +78,7 @@ router.post('/:personaId/chat', rateLimit_js_1.rateLimit, async (req, res, next)
                 sender: 'ai',
                 text: aiResponse.aiMessage,
                 timestamp: new Date().toISOString(),
-                meta: {
-                    llmTokens: aiResponse.usage?.total_tokens
-                }
+                meta: { llmTokens: undefined }
             }
         ];
         const remainingMs = (0, timerService_js_1.computeRemainingMs)(persona.expiresAt ?? null);

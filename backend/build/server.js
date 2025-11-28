@@ -15,21 +15,30 @@ app.use((0, cors_1.default)({
 }));
 app.use(express_1.default.json());
 // Env variables
-const { FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY, FIREBASE_DATABASE_URL, PORT = "5000", } = process.env;
-// Validate env
-if (!FIREBASE_PROJECT_ID || !FIREBASE_CLIENT_EMAIL || !FIREBASE_PRIVATE_KEY) {
-    console.error("Missing Firebase environment variables.");
+const { FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY, FIREBASE_DATABASE_URL, GOOGLE_APPLICATION_CREDENTIALS, FIRESTORE_ENABLED, PORT = "5000", } = process.env;
+// For now, run in fallback-only mode to avoid Firestore permission issues
+const FIRESTORE_ON = FIRESTORE_ENABLED === 'true' && false;
+if (FIREBASE_PROJECT_ID && FIREBASE_CLIENT_EMAIL && FIREBASE_PRIVATE_KEY) {
+    const firebasePrivateKey = FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n");
+    firebase_admin_1.default.initializeApp({
+        credential: firebase_admin_1.default.credential.cert({
+            projectId: FIREBASE_PROJECT_ID,
+            clientEmail: FIREBASE_CLIENT_EMAIL,
+            privateKey: firebasePrivateKey,
+        }),
+        databaseURL: FIREBASE_DATABASE_URL || `https://${FIREBASE_PROJECT_ID}.firebaseio.com`
+    });
+}
+else if (GOOGLE_APPLICATION_CREDENTIALS) {
+    firebase_admin_1.default.initializeApp({
+        credential: firebase_admin_1.default.credential.applicationDefault(),
+        databaseURL: FIREBASE_DATABASE_URL || (FIREBASE_PROJECT_ID ? `https://${FIREBASE_PROJECT_ID}.firebaseio.com` : undefined)
+    });
+}
+else {
+    console.error("Missing Firebase environment variables (provide FIREBASE_* or GOOGLE_APPLICATION_CREDENTIALS).");
     process.exit(1);
 }
-const firebasePrivateKey = FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n");
-firebase_admin_1.default.initializeApp({
-    credential: firebase_admin_1.default.credential.cert({
-        projectId: FIREBASE_PROJECT_ID,
-        clientEmail: FIREBASE_CLIENT_EMAIL,
-        privateKey: firebasePrivateKey,
-    }),
-    databaseURL: FIREBASE_DATABASE_URL || `https://${FIREBASE_PROJECT_ID}.firebaseio.com`
-});
 const PERSONAS_COLLECTION = 'personas';
 const DEFAULT_GUIDANCE_MESSAGE = 'This persona has reached closure. Take a moment to reflect.';
 const FALLBACK_PERSONA_NAME = process.env.FALLBACK_PERSONA_NAME ?? 'Rememory Companion';
@@ -76,6 +85,8 @@ const getPersonaById = async (id) => {
     const fallback = getFallbackPersonaById(id);
     if (fallback)
         return fallback;
+    if (!FIRESTORE_ON)
+        return null;
     try {
         const doc = await firebase_admin_1.default.firestore().collection(PERSONAS_COLLECTION).doc(id).get();
         if (!doc.exists)
@@ -184,6 +195,8 @@ const getFallbackPersonaById = (personaId) => {
     return fallbackPersonaStore.get(personaId) ?? null;
 };
 const getPersonaByOwnerFromFirestore = async (ownerId) => {
+    if (!FIRESTORE_ON)
+        return null;
     const snapshot = await firebase_admin_1.default
         .firestore()
         .collection(PERSONAS_COLLECTION)
@@ -221,6 +234,9 @@ const formatPersonaResponse = (persona) => {
         id: persona.id,
         name: persona.name ?? 'Companion',
         relationship: persona.relationship ?? '',
+        userNickname: persona.userNickname ?? '',
+        biography: persona.biography ?? '',
+        speakingStyle: persona.speakingStyle ?? '',
         status: persona.status ?? 'active',
         expiresAt: expiresAtIso,
         remainingMs: computeRemainingMsValue(persona.expiresAt),
@@ -239,6 +255,9 @@ const validatePersonaPayload = (body) => {
         error.status = 400;
         throw error;
     }
+    const userNickname = typeof body.userNickname === 'string' ? body.userNickname.trim() : '';
+    const biography = typeof body.biography === 'string' ? body.biography.trim() : '';
+    const speakingStyle = typeof body.speakingStyle === 'string' ? body.speakingStyle.trim() : '';
     const traits = sanitizeStringArray(body.traits, ['Compassionate', 'Grounded'], 8);
     const keyMemories = sanitizeStringArray(body.keyMemories, ['Quiet evenings together'], 10);
     const commonPhrases = sanitizeStringArray(body.commonPhrases, ['I am with you.'], 10);
@@ -246,6 +265,9 @@ const validatePersonaPayload = (body) => {
     return {
         name,
         relationship,
+        userNickname,
+        biography,
+        speakingStyle,
         traits,
         keyMemories,
         commonPhrases,
@@ -336,14 +358,35 @@ app.post('/api/persona', async (req, res) => {
             return res.status(400).json({ error: 'persona_exists' });
         }
         const payload = validatePersonaPayload(req.body ?? {});
-        const docRef = await firebase_admin_1.default.firestore().collection(PERSONAS_COLLECTION).add({
-            ...payload,
+        if (FIRESTORE_ON) {
+            const docRef = await firebase_admin_1.default.firestore().collection(PERSONAS_COLLECTION).add({
+                ...payload,
+                ownerId: user.uid,
+                status: 'active',
+                createdAt: firebase_admin_1.default.firestore.FieldValue.serverTimestamp(),
+                guidanceLevel: 0
+            });
+            return res.status(201).json({ id: docRef.id });
+        }
+        // fallback-only mode
+        const fallbackId = (0, node_crypto_1.randomUUID)();
+        const personaRecord = {
+            id: fallbackId,
             ownerId: user.uid,
             status: 'active',
-            createdAt: firebase_admin_1.default.firestore.FieldValue.serverTimestamp(),
-            guidanceLevel: 0
-        });
-        return res.status(201).json({ id: docRef.id });
+            guidanceLevel: 0,
+            name: payload.name,
+            relationship: payload.relationship,
+            userNickname: payload.userNickname,
+            biography: payload.biography,
+            speakingStyle: payload.speakingStyle,
+            traits: payload.traits,
+            keyMemories: payload.keyMemories,
+            commonPhrases: payload.commonPhrases,
+            voiceSampleUrl: payload.voiceSampleUrl ?? null
+        };
+        storeFallbackPersona(user.uid, personaRecord);
+        return res.status(201).json({ id: fallbackId, fallback: true });
     }
     catch (error) {
         const status = error.status ?? 500;
@@ -359,6 +402,9 @@ app.post('/api/persona', async (req, res) => {
                 guidanceLevel: 0,
                 name: payload.name,
                 relationship: payload.relationship,
+                userNickname: payload.userNickname,
+                biography: payload.biography,
+                speakingStyle: payload.speakingStyle,
                 traits: payload.traits,
                 keyMemories: payload.keyMemories,
                 commonPhrases: payload.commonPhrases,
@@ -368,6 +414,61 @@ app.post('/api/persona', async (req, res) => {
             return res.status(201).json({ id: fallbackId, fallback: true });
         }
         return res.status(status).json({ error: message });
+    }
+});
+app.put('/api/persona/:id', async (req, res) => {
+    const user = await requireAuth(req, res);
+    if (!user)
+        return;
+    const personaId = req.params.id;
+    const updates = req.body ?? {};
+    // Block identity changes
+    if (updates.name || updates.relationship) {
+        return res.status(400).json({ error: 'identity_locked', message: 'Cannot change name or relationship.' });
+    }
+    // Prepare allowed fields
+    const payload = {
+        userNickname: typeof updates.userNickname === 'string' ? updates.userNickname.trim() : undefined,
+        biography: typeof updates.biography === 'string' ? updates.biography.trim() : undefined,
+        speakingStyle: typeof updates.speakingStyle === 'string' ? updates.speakingStyle.trim() : undefined,
+        traits: sanitizeStringArray(updates.traits, [], 8),
+        keyMemories: sanitizeStringArray(updates.keyMemories, [], 10),
+        commonPhrases: sanitizeStringArray(updates.commonPhrases, [], 10),
+        voiceSampleUrl: typeof updates.voiceSampleUrl === 'string' && updates.voiceSampleUrl.trim()
+            ? updates.voiceSampleUrl.trim()
+            : undefined
+    };
+    // Remove undefined so we don't overwrite with empty
+    Object.keys(payload).forEach((k) => payload[k] === undefined && delete payload[k]);
+    if (Object.keys(payload).length === 0) {
+        return res.status(400).json({ error: 'no_updates', message: 'No updatable fields provided.' });
+    }
+    try {
+        if (FIRESTORE_ON) {
+            await firebase_admin_1.default.firestore().collection(PERSONAS_COLLECTION).doc(personaId).update(payload);
+            const refreshed = await getPersonaById(personaId);
+            if (refreshed)
+                storeFallbackPersona(user.uid, refreshed);
+            return res.status(204).send();
+        }
+        // fallback-only update
+        const existing = getFallbackPersonaById(personaId);
+        if (existing) {
+            const merged = { ...existing, ...payload };
+            storeFallbackPersona(user.uid, merged);
+            return res.status(204).send();
+        }
+        return res.status(404).json({ error: 'persona_not_found' });
+    }
+    catch (error) {
+        console.error('Update failed, trying fallback', error);
+        const existing = getFallbackPersonaById(personaId);
+        if (existing) {
+            const merged = { ...existing, ...payload };
+            storeFallbackPersona(user.uid, merged);
+            return res.status(204).send();
+        }
+        return res.status(500).json({ error: 'update_failed' });
     }
 });
 const personaChatHandler = async (req, res) => {
@@ -390,6 +491,8 @@ const personaChatHandler = async (req, res) => {
             name: FALLBACK_PERSONA_NAME,
             memories: FALLBACK_PERSONA_MEMORIES,
             keyMemories: [],
+            userNickname: 'friend',
+            speakingStyle: '',
             expiresAt: null,
             status: 'active'
         };
@@ -402,6 +505,15 @@ const personaChatHandler = async (req, res) => {
     }
     const prompt = `You are simulating a deceased person with these memories:
 ${buildPersonaMemories(persona)}
+
+ Rules:
+- Speak as ${persona.name}, first person. Always call the user "${persona.userNickname || persona.relationship || 'friend'}".
+- Use speaking style: ${persona.speakingStyle ?? 'casual, direct'}.
+- Keep replies short (1-2 sentences), plain, human. No poetic or scenic language.
+- Do NOT mention any location (including China) unless the user's current message mentions it.
+- Only mention a memory if it is directly relevant to what the user just said; keep it to one short sentence.
+- Avoid therapy clichés; respond how ${persona.name} really would.
+ - Persona bio/context: ${persona.biography ?? ''}. Traits: ${(persona.traits ?? []).join(', ')}. Common phrases: ${(persona.commonPhrases ?? []).join(', ')}.
 
 User: ${userMessage}
 AI:`;

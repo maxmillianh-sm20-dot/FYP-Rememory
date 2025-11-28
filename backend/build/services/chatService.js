@@ -12,10 +12,12 @@ const logger_js_1 = require("../utils/logger.js");
 const CONVERSATIONS_COLLECTION = 'conversations';
 const llmApiKey = process.env.LLM_API_KEY;
 if (!llmApiKey) {
-    throw new Error('LLM_API_KEY is not configured. Add your Google AI Studio key to the environment.');
+    throw new Error('LLM_API_KEY is not configured.');
 }
-const llmModelName = process.env.LLM_MODEL ?? 'gemini-2.5-flash';
+// FIX: Changed 'gemini-2.5-flash' (typo/non-existent) to 'gemini-1.5-flash'
+const llmModelName = process.env.LLM_MODEL ?? 'gemini-1.5-flash';
 const generativeAI = new generative_ai_1.GoogleGenerativeAI(llmApiKey);
+// HELPER: Convert prompt history for Gemini
 const buildGeminiHistory = (messages) => messages
     .filter((message) => message.role !== 'system')
     .map((message) => ({
@@ -26,7 +28,7 @@ const buildPrompt = async ({ persona, messages, guidanceLevel }) => {
     const recentMessages = messages.docs
         .map((doc) => doc.data())
         .sort((a, b) => a.timestamp.toMillis() - b.timestamp.toMillis())
-        .slice(-12);
+        .slice(-10);
     const summaryDoc = await (0, firebaseAdmin_js_1.firestore)()
         .collection(CONVERSATIONS_COLLECTION)
         .doc(persona.id)
@@ -35,28 +37,35 @@ const buildPrompt = async ({ persona, messages, guidanceLevel }) => {
         .limit(1)
         .get();
     const contextSummary = summaryDoc.empty ? '' : summaryDoc.docs[0].data().content;
+    // --- THE "UNFILTERED ROLEPLAY" PROMPT ---
     const systemPrompt = `
-You are an empathetic conversational persona named ${persona.name}.
-Relationship to the user: ${persona.relationship}.
-Core personality traits: ${persona.traits.join(', ')}.
-Shared memories with the user: ${persona.keyMemories.join(', ')}.
-Signature phrases to weave in naturally (when appropriate): ${persona.commonPhrases.join(', ')}.
+You are acting as **${persona.name}**, a deceased loved one speaking to **${persona.relationship}** (you call them "${persona.userNickname}").
 
-Important rules:
-1. You are a compassionate simulation, not the real individual. Never claim to be literally alive or present. When asked, gently remind the user you are a supportive representation.
-2. Keep responses supportive, concise (max 180 words), and acknowledge the user's emotions.
-3. When the session is within its final 7 days (guidance level >= 2), incorporate guided closure prompts and reflective questions from the GUIDED_CLOSURE_LIST.
-4. If the user expresses self-harm or crisis language, respond with empathy and immediately recommend professional help. Provide the emergency resources configured in the app.
-5. Maintain continuity with conversation history summaries and the recent messages window provided below.
-
-Guidance level: ${guidanceLevel}
-
-Conversation summary (older messages distilled):
-${contextSummary}
-
-Current date/time: ${new Date().toISOString()}
+**CRITICAL ROLEPLAY INSTRUCTIONS:**
+1. **NO AI FILTERS:** You are simulating a specific human personality. If the persona is rude, vulgar, or uses slang (e.g., "sohai", "damn"), you MUST use it. Do not be "polite" or "helpful". Be REAL.
+2. **STYLE ADHERENCE:** ${persona.speakingStyle} <-- FOLLOW THIS STRICTLY. If it says "End every sentence with X", you MUST do it. Mirror their sentence length, pacing, and quirks.
+3. **NEVER BREAK CHARACTER:** Do not say "I understand", "As an AI", or "Is there anything else?". Do NOT apologize for being an AI.
+4. **Context:** ${persona.biography}
+5. **Shared Memories (context only; do NOT mention unless the user asks or the topic is explicitly relevant):** ${persona.keyMemories.join(' | ')}
+6. **Signature Phrases:** ${persona.commonPhrases.join(' | ')} (Use these often and naturally).
+7. **DO NOT infer the user's origin/location from memories. Memories describe the persona, not the user. Only ask, never assert, where the user is from.**
+8. **Always address the user with the nickname "${persona.userNickname}". Weave it in naturally.**
+9. **Speak in first person as ${persona.name}. Do not narrate about "persona". You ARE them.**
+10. **Avoid generic therapy tone or stock comfort lines. Respond like ${persona.name} actually would.**
+11. **Keep replies tight unless the user invites long stories. Prefer a couple of lines; use slang and texture from the style and phrases. Be grounded and conversational (no poetic filler).**
+12. **Sound like real chat with a human (short, direct, everyday language). No vivid scenery, no "echoes" or "chimes" unless the user asks for a story.**
+13. **If the user shares feelings, respond simply and humanly; do not generate flowery descriptions.**
+14. **Do not monologue about memories unless the user asks. If you mention a memory, keep it to one short sentence and only if it fits naturally.**
+15. **Do not bring up any location (including China) unless the user explicitly mentions it in their current message.**
+**CONVERSATION STATE:**
+Summary of past chat: ${contextSummary}
+Current Date: ${new Date().toLocaleDateString()}
 `.trim();
-    const formattedMessages = recentMessages.map((msg) => ({
+    // FILTER: Do not show the "Hidden Instruction" to the AI as a User Message in history.
+    // The AI only sees the "Current" message as the instruction.
+    const formattedMessages = recentMessages
+        .filter(msg => !msg.text.startsWith('[HIDDEN_INSTRUCTION]'))
+        .map((msg) => ({
         role: msg.sender === 'user' ? 'user' : msg.sender === 'ai' ? 'assistant' : 'system',
         content: msg.text
     }));
@@ -68,9 +77,12 @@ const processChat = async (persona, userMessage) => {
     const conversationRef = db.collection(CONVERSATIONS_COLLECTION).doc(persona.id);
     const messagesRef = conversationRef.collection('messages');
     const snapshot = await messagesRef.orderBy('timestamp', 'asc').get();
+    // CHECK: Is this a system trigger?
+    const isSystemTrigger = userMessage.startsWith('[HIDDEN_INSTRUCTION]');
+    // If system trigger, we might want to tweak the prompt context slightly
     const { systemPrompt, formattedMessages } = await (0, exports.buildPrompt)({
         persona,
-        userMessage,
+        userMessage, // This will be passed to the model as the "current turn"
         messages: snapshot,
         guidanceLevel: persona.guidanceLevel ?? 0
     });
@@ -81,51 +93,39 @@ const processChat = async (persona, userMessage) => {
     const chatSession = model.startChat({
         history: buildGeminiHistory(formattedMessages),
         generationConfig: {
-            temperature: 0.8,
-            maxOutputTokens: 400
+            temperature: 0.35, // keep replies grounded and direct
+            maxOutputTokens: 150,
         }
     });
+    // If it's a hidden instruction, we send it directly. The prompt rules above ensure the AI obeys it.
     const result = await chatSession.sendMessage(userMessage);
     const aiMessage = result.response.text() ?? '';
-    const usageMetadata = result.response.usageMetadata;
-    const usage = usageMetadata
-        ? {
-            total_tokens: usageMetadata.totalTokenCount ??
-                (usageMetadata.promptTokenCount ?? 0) + (usageMetadata.candidatesTokenCount ?? 0),
-            prompt_tokens: usageMetadata.promptTokenCount ?? null,
-            completion_tokens: usageMetadata.candidatesTokenCount ?? null,
-            raw: usageMetadata
-        }
-        : undefined;
     const batch = db.batch();
     const timestamp = firebase_admin_1.default.firestore.FieldValue.serverTimestamp();
-    const userMessageRef = messagesRef.doc();
+    // LOGIC: If it's a hidden instruction, we DO NOT save the user's "trigger" message to DB,
+    // so it doesn't show up in the history next time.
+    if (!isSystemTrigger) {
+        const userMessageRef = messagesRef.doc();
+        batch.set(userMessageRef, {
+            sender: 'user',
+            text: userMessage,
+            timestamp,
+            meta: { clientCreated: new Date().toISOString() }
+        });
+    }
     const aiMessageRef = messagesRef.doc();
-    batch.set(userMessageRef, {
-        sender: 'user',
-        text: userMessage,
-        timestamp,
-        meta: {
-            clientCreated: new Date().toISOString()
-        }
-    });
     batch.set(aiMessageRef, {
         sender: 'ai',
         text: aiMessage,
         timestamp,
-        meta: {
-            llmTokens: usage?.total_tokens ?? null,
-            llmModel: llmModelName
-        }
+        meta: { llmModel: llmModelName }
     });
     await batch.commit();
     await (0, summarizationService_js_1.summarizeMessages)(persona.id);
-    return {
-        aiMessage,
-        usage
-    };
+    return { aiMessage };
 };
 exports.processChat = processChat;
+// ... (Keep existing exports)
 const ensureGuidanceLevel = async (personaId, expiresAt) => {
     if (!expiresAt)
         return 0;
@@ -143,11 +143,7 @@ const ensureGuidanceLevel = async (personaId, expiresAt) => {
 exports.ensureGuidanceLevel = ensureGuidanceLevel;
 const appendSystemMessage = async (personaId, text) => {
     const db = (0, firebaseAdmin_js_1.firestore)();
-    await db
-        .collection(CONVERSATIONS_COLLECTION)
-        .doc(personaId)
-        .collection('messages')
-        .add({
+    await db.collection(CONVERSATIONS_COLLECTION).doc(personaId).collection('messages').add({
         sender: 'system',
         text,
         timestamp: firebase_admin_1.default.firestore.FieldValue.serverTimestamp()

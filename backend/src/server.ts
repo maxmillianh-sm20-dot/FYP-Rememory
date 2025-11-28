@@ -20,8 +20,12 @@ const {
   FIREBASE_PRIVATE_KEY,
   FIREBASE_DATABASE_URL,
   GOOGLE_APPLICATION_CREDENTIALS,
+  FIRESTORE_ENABLED,
   PORT = "5000",
 } = process.env;
+
+// For now, run in fallback-only mode to avoid Firestore permission issues
+const FIRESTORE_ON = FIRESTORE_ENABLED === 'true' && false;
 
 if (FIREBASE_PROJECT_ID && FIREBASE_CLIENT_EMAIL && FIREBASE_PRIVATE_KEY) {
   const firebasePrivateKey = FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n");
@@ -121,6 +125,7 @@ const geminiCandidates = [
 const getPersonaById = async (id: string): Promise<PersonaRecord | null> => {
   const fallback = getFallbackPersonaById(id);
   if (fallback) return fallback;
+  if (!FIRESTORE_ON) return null;
   try {
     const doc = await admin.firestore().collection(PERSONAS_COLLECTION).doc(id).get();
     if (!doc.exists) return null;
@@ -236,6 +241,7 @@ const getFallbackPersonaById = (personaId: string) => {
 };
 
 const getPersonaByOwnerFromFirestore = async (ownerId: string) => {
+  if (!FIRESTORE_ON) return null;
   const snapshot = await admin
     .firestore()
     .collection(PERSONAS_COLLECTION)
@@ -410,14 +416,35 @@ app.post('/api/persona', async (req, res) => {
       return res.status(400).json({ error: 'persona_exists' });
     }
     const payload = validatePersonaPayload(req.body ?? {});
-    const docRef = await admin.firestore().collection(PERSONAS_COLLECTION).add({
-      ...payload,
+    if (FIRESTORE_ON) {
+      const docRef = await admin.firestore().collection(PERSONAS_COLLECTION).add({
+        ...payload,
+        ownerId: user.uid,
+        status: 'active',
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        guidanceLevel: 0
+      });
+      return res.status(201).json({ id: docRef.id });
+    }
+    // fallback-only mode
+    const fallbackId = randomUUID();
+    const personaRecord: PersonaRecord = {
+      id: fallbackId,
       ownerId: user.uid,
       status: 'active',
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      guidanceLevel: 0
-    });
-    return res.status(201).json({ id: docRef.id });
+      guidanceLevel: 0,
+      name: payload.name,
+      relationship: payload.relationship,
+      userNickname: payload.userNickname,
+      biography: payload.biography,
+      speakingStyle: payload.speakingStyle,
+      traits: payload.traits,
+      keyMemories: payload.keyMemories,
+      commonPhrases: payload.commonPhrases,
+      voiceSampleUrl: payload.voiceSampleUrl ?? null
+    };
+    storeFallbackPersona(user.uid, personaRecord);
+    return res.status(201).json({ id: fallbackId, fallback: true });
   } catch (error) {
     const status = (error as any).status ?? 500;
     const message = error instanceof Error ? error.message : String(error);
@@ -479,11 +506,20 @@ app.put('/api/persona/:id', async (req, res) => {
   }
 
   try {
-    await admin.firestore().collection(PERSONAS_COLLECTION).doc(personaId).update(payload);
-    // refresh fallback
-    const refreshed = await getPersonaById(personaId);
-    if (refreshed) storeFallbackPersona(user.uid, refreshed);
-    return res.status(204).send();
+    if (FIRESTORE_ON) {
+      await admin.firestore().collection(PERSONAS_COLLECTION).doc(personaId).update(payload);
+      const refreshed = await getPersonaById(personaId);
+      if (refreshed) storeFallbackPersona(user.uid, refreshed);
+      return res.status(204).send();
+    }
+    // fallback-only update
+    const existing = getFallbackPersonaById(personaId);
+    if (existing) {
+      const merged = { ...existing, ...payload };
+      storeFallbackPersona(user.uid, merged);
+      return res.status(204).send();
+    }
+    return res.status(404).json({ error: 'persona_not_found' });
   } catch (error) {
     console.error('Update failed, trying fallback', error);
     const existing = getFallbackPersonaById(personaId);

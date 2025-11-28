@@ -83,9 +83,7 @@ router.post('/:personaId/chat', rateLimit, async (req: AuthenticatedRequest, res
         sender: 'ai' as const,
         text: aiResponse.aiMessage,
         timestamp: new Date().toISOString(),
-        meta: {
-          llmTokens: aiResponse.usage?.total_tokens
-        }
+        meta: { llmTokens: undefined }
       }
     ];
 
@@ -103,4 +101,3 @@ router.post('/:personaId/chat', rateLimit, async (req: AuthenticatedRequest, res
 });
 
 export { router as chatRouter };
-

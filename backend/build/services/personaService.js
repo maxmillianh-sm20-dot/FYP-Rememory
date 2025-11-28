@@ -41,6 +41,10 @@ const updatePersona = async (personaId, ownerId, updates) => {
     if (!doc.exists || doc.data()?.ownerId !== ownerId) {
         throw Object.assign(new Error('Persona not found'), { status: 404, code: 'persona_not_found' });
     }
+    // SECURITY: Prevent changing identity fields during an update
+    if (updates.name || updates.relationship) {
+        throw Object.assign(new Error('Cannot edit identity fields (Name/Relationship) to preserve immersion.'), { status: 400, code: 'identity_locked' });
+    }
     await docRef.update(updates);
 };
 exports.updatePersona = updatePersona;
